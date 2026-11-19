@@ -20,12 +20,6 @@
 			"database_name": "global-news-bot-db",
 			"database_id": "c44e0cf6-a446-451f-9c6a-b6f5bf520605",
 			"migrations_dir": "migrations"
-		},
-		{
-			"binding": "global_news_bot_db",
-			"database_name": "global-news-bot-db",
-			"database_id": "c44e0cf6-a446-451f-9c6a-b6f5bf520605",
-			"remote": true
 		}
 	]
 }
