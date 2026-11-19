@@ -1,0 +1,31 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "global-news-intel-bot",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		"ENVIRONMENT": "production"
+	},
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "global-news-bot-db",
+			"database_id": "c44e0cf6-a446-451f-9c6a-b6f5bf520605",
+			"migrations_dir": "migrations"
+		},
+		{
+			"binding": "global_news_bot_db",
+			"database_name": "global-news-bot-db",
+			"database_id": "c44e0cf6-a446-451f-9c6a-b6f5bf520605",
+			"remote": true
+		}
+	]
+}
