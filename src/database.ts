@@ -1099,3 +1099,95 @@ export async function recordTelegramUpdateIfNew(
     .run();
   return (result.meta.changes ?? 0) > 0;
 }
+
+// ============================================================================
+// 9. Admin Panel & Status Queries
+// ============================================================================
+
+export async function archiveSourceById(
+  db: D1Database,
+  sourceId: number,
+  now: number = Date.now()
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE sources
+       SET status = 'ARCHIVED', archived_at = ?
+       WHERE id = ? AND status != 'ARCHIVED'`
+    )
+    .bind(now, sourceId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function listFailedOutbox(
+  db: D1Database,
+  limit: number = 5
+): Promise<OutboxRecord[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM delivery_outbox
+       WHERE status = 'FAILED'
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<OutboxRecord>();
+  return results;
+}
+
+export interface SystemStatusSummary {
+  activeSources: number;
+  queuedClusters: number;
+  publishedTotal: number;
+  publishedLastHour: number;
+  publishedLast24Hours: number;
+  pendingJobs: number;
+  failedOutboxCount: number;
+  recentErrorCount: number;
+}
+
+export async function getSystemStatusSummary(
+  db: D1Database,
+  now: number = Date.now()
+): Promise<SystemStatusSummary> {
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+  const [
+    sourcesRes,
+    queuedRes,
+    pubTotalRes,
+    pubHourRes,
+    pubDayRes,
+    jobsRes,
+    failedOutboxRes,
+    errorsRes,
+  ] = await db.batch<{ count: number }>([
+    db.prepare(`SELECT COUNT(*) AS count FROM sources WHERE status = 'ACTIVE'`),
+    db.prepare(`SELECT COUNT(*) AS count FROM story_clusters WHERE status = 'QUEUED'`),
+    db.prepare(`SELECT COUNT(*) AS count FROM publication_events`),
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM publication_events WHERE published_at >= ?`)
+      .bind(oneHourAgo),
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM publication_events WHERE published_at >= ?`)
+      .bind(oneDayAgo),
+    db.prepare(`SELECT COUNT(*) AS count FROM jobs WHERE status IN ('PENDING', 'RUNNING')`),
+    db.prepare(`SELECT COUNT(*) AS count FROM delivery_outbox WHERE status = 'FAILED'`),
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM system_logs WHERE level = 'ERROR' AND created_at >= ?`)
+      .bind(oneDayAgo),
+  ]);
+
+  return {
+    activeSources: Number(sourcesRes?.results[0]?.count ?? 0),
+    queuedClusters: Number(queuedRes?.results[0]?.count ?? 0),
+    publishedTotal: Number(pubTotalRes?.results[0]?.count ?? 0),
+    publishedLastHour: Number(pubHourRes?.results[0]?.count ?? 0),
+    publishedLast24Hours: Number(pubDayRes?.results[0]?.count ?? 0),
+    pendingJobs: Number(jobsRes?.results[0]?.count ?? 0),
+    failedOutboxCount: Number(failedOutboxRes?.results[0]?.count ?? 0),
+    recentErrorCount: Number(errorsRes?.results[0]?.count ?? 0),
+  };
+}
