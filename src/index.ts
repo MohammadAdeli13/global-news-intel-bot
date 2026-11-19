@@ -1,6 +1,7 @@
 import { handleTelegramUpdate } from "./admin";
 import { logSystemEvent, recordTelegramUpdateIfNew } from "./database";
 import type { Env } from "./env";
+import { runScheduledPipeline } from "./news";
 import { verifyWebhookSecret } from "./security";
 import type { TelegramUpdate } from "./telegram";
 
@@ -56,7 +57,6 @@ const worker = {
         });
       }
 
-      // Always return 200 OK to Telegram after deduplicating to prevent retry loops
       return Response.json({ ok: true }, { status: 200 });
     }
 
@@ -64,17 +64,17 @@ const worker = {
   },
 
   async scheduled(
-    controller: ScheduledController,
-    _env: Env,
+    _controller: ScheduledController,
+    env: Env,
     _ctx: ExecutionContext
   ): Promise<void> {
+    const summary = await runScheduledPipeline(env);
     console.log(
       JSON.stringify({
         level: "INFO",
         component: "cron",
-        message: "Scheduled heartbeat triggered",
-        cron: controller.cron,
-        scheduledTime: new Date(controller.scheduledTime).toISOString(),
+        message: "Scheduled pipeline completed",
+        summary,
       })
     );
   },

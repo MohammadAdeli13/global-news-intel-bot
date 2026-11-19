@@ -1,9 +1,12 @@
 import {
   DEFAULT_SETTINGS,
   LeaseLostError,
+  type AttributionConfidence,
   type BotSettings,
   type ClusterSourceRecord,
+  type ClusterStatus,
   type CreateClusterInput,
+  type CredibilityTier,
   type EnqueueOutboxInput,
   type InsertArticleInput,
   type JobRecord,
@@ -11,13 +14,18 @@ import {
   type LeaseContext,
   type LeaseRecord,
   type LogLevel,
+  type NewsCategory,
+  type OriginType,
   type OutboxFailureCode,
   type OutboxRecord,
+  type PublicationEventRecord,
   type PublicationSnapshot,
   type SourceRecord,
   type StoryClusterRecord,
   type SystemLogRecord,
   type UpsertSourceInput,
+  type UrgencyLevel,
+  type VerificationLabel,
 } from "./types";
 
 export const CRON_LOCK_NAME = "cron_pipeline";
@@ -1189,5 +1197,507 @@ export async function getSystemStatusSummary(
     pendingJobs: Number(jobsRes?.results[0]?.count ?? 0),
     failedOutboxCount: Number(failedOutboxRes?.results[0]?.count ?? 0),
     recentErrorCount: Number(errorsRes?.results[0]?.count ?? 0),
+  };
+}
+
+// ============================================================================
+// 10. Pipeline Support Queries (Ingest, Clustering, Publishing & Retention)
+// ============================================================================
+
+export async function seedDefaultSourcesIfEmpty(
+  db: D1Database,
+  defaultSources: readonly UpsertSourceInput[]
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS count FROM sources`)
+    .first<{ count: number }>();
+
+  if (Number(row?.count ?? 0) > 0 || defaultSources.length === 0) {
+    return 0;
+  }
+
+  const stmts = defaultSources.map((src) =>
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO sources (
+           name, url, type, publisher_group, is_wire_agency,
+           credibility_tier, base_credibility, status
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`
+      )
+      .bind(
+        src.name,
+        src.url,
+        src.type,
+        src.publisherGroup,
+        src.isWireAgency ? 1 : 0,
+        src.credibilityTier,
+        src.baseCredibility
+      )
+  );
+
+  const results = await db.batch(stmts);
+  return results.reduce((sum, r) => sum + (r.meta.changes ?? 0), 0);
+}
+
+export async function getOrCreateGdeltSource(
+  db: D1Database
+): Promise<SourceRecord> {
+  const gdeltUrl = "https://api.gdeltproject.org/api/v2/doc/doc";
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO sources (
+         name, url, type, publisher_group, is_wire_agency,
+         credibility_tier, base_credibility, status
+       )
+       VALUES ('GDELT Global Events', ?, 'gdelt', 'gdelt', 0, 2, 70, 'ACTIVE')`
+    )
+    .bind(gdeltUrl)
+    .run();
+
+  const row = await db
+    .prepare(`SELECT * FROM sources WHERE url = ?`)
+    .bind(gdeltUrl)
+    .first<SourceRecord>();
+
+  if (!row) {
+    throw new Error("Failed to initialize GDELT source record");
+  }
+  return row;
+}
+
+export async function updateSourceFetchOutcome(
+  db: D1Database,
+  lease: LeaseContext,
+  params: {
+    sourceId: number;
+    ok: boolean;
+    etag: string | null;
+    lastModified: string | null;
+    nextFetchAt: number;
+    error: string | null;
+  },
+  now: number = Date.now()
+): Promise<void> {
+  const result = await db
+    .prepare(
+      `UPDATE sources
+       SET
+         etag = ?,
+         last_modified = ?,
+         last_fetched_at = ?,
+         next_fetch_at = ?,
+         consecutive_failures = CASE WHEN ? = 1 THEN 0 ELSE consecutive_failures + 1 END,
+         last_error = ?
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM leases
+           WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+         )`
+    )
+    .bind(
+      params.etag,
+      params.lastModified,
+      now,
+      params.nextFetchAt,
+      params.ok ? 1 : 0,
+      params.error ? params.error.slice(0, 300) : null,
+      params.sourceId,
+      lease.lockName,
+      lease.ownerId,
+      lease.fencingToken,
+      now
+    )
+    .run();
+
+  if ((result.meta.changes ?? 0) === 0) {
+    throw new LeaseLostError(
+      `Lease lost while updating source #${params.sourceId} fetch outcome`
+    );
+  }
+}
+
+export async function findExistingUrlHashes(
+  db: D1Database,
+  urlHashes: readonly string[]
+): Promise<Set<string>> {
+  const existing = new Set<string>();
+  const unique = [...new Set(urlHashes)];
+  if (unique.length === 0) return existing;
+
+  // Chunk by 50 to stay comfortably under D1's 100-parameter bind cap
+  for (let i = 0; i < unique.length; i += 50) {
+    const chunk = unique.slice(i, i + 50);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const { results } = await db
+      .prepare(`SELECT url_hash FROM articles WHERE url_hash IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ url_hash: string }>();
+
+    for (const row of results) {
+      existing.add(row.url_hash);
+    }
+  }
+
+  return existing;
+}
+
+export async function getActiveClustersForMatching(
+  db: D1Database,
+  minEventTime: number,
+  limit: number = 100
+): Promise<StoryClusterRecord[]> {
+  const boundedLimit = Math.min(Math.max(limit, 1), 100);
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM story_clusters
+       WHERE status IN ('COLLECTING', 'QUEUED', 'PUBLISHED')
+         AND event_time >= ?
+       ORDER BY event_time DESC
+       LIMIT ?`
+    )
+    .bind(minEventTime, boundedLimit)
+    .all<StoryClusterRecord>();
+
+  return results;
+}
+
+export interface ClusterArticleWithSource {
+  id: number;
+  cluster_id: number;
+  source_id: number;
+  source_name: string;
+  canonical_url: string;
+  title: string;
+  summary: string | null;
+  author: string | null;
+  published_at: number;
+  fetched_at: number;
+}
+
+export async function getClusterArticlesWithSources(
+  db: D1Database,
+  clusterId: number,
+  limit: number = 15
+): Promise<ClusterArticleWithSource[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT
+         a.id, a.cluster_id, a.source_id, s.name AS source_name,
+         a.canonical_url, a.title, a.summary, a.author,
+         a.published_at, a.fetched_at
+       FROM articles a
+       JOIN sources s ON s.id = a.source_id
+       WHERE a.cluster_id = ?
+       ORDER BY a.published_at DESC, a.id DESC
+       LIMIT ?`
+    )
+    .bind(clusterId, limit)
+    .all<ClusterArticleWithSource>();
+
+  return results;
+}
+
+export interface IndependentSourceDbSignal {
+  origin_type: OriginType;
+  attribution_confidence: AttributionConfidence;
+  base_credibility: number;
+  credibility_tier: CredibilityTier;
+}
+
+export async function getClusterIndependentSourceSignals(
+  db: D1Database,
+  clusterId: number
+): Promise<IndependentSourceDbSignal[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT
+         cs.origin_type,
+         cs.attribution_confidence,
+         s.base_credibility,
+         s.credibility_tier
+       FROM cluster_sources cs
+       JOIN sources s ON s.id = cs.first_source_id
+       WHERE cs.cluster_id = ?`
+    )
+    .bind(clusterId)
+    .all<IndependentSourceDbSignal>();
+
+  return results;
+}
+
+export async function updateClusterEvaluation(
+  db: D1Database,
+  lease: LeaseContext,
+  params: {
+    clusterId: number;
+    category: NewsCategory;
+    entities: readonly string[];
+    locations: readonly string[];
+    concepts: readonly string[];
+    importanceScore: number;
+    credibilityScore: number;
+    confidenceScore: number;
+    urgency: UrgencyLevel;
+    verificationLabel: VerificationLabel;
+    status: ClusterStatus;
+  },
+  now: number = Date.now()
+): Promise<void> {
+  const result = await db
+    .prepare(
+      `UPDATE story_clusters
+       SET
+         category = ?,
+         entities_json = ?,
+         locations_json = ?,
+         concepts_json = ?,
+         importance_score = ?,
+         credibility_score = ?,
+         confidence_score = ?,
+         urgency = ?,
+         verification_label = ?,
+         status = ?,
+         updated_at = ?
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM leases
+           WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+         )`
+    )
+    .bind(
+      params.category,
+      JSON.stringify(params.entities),
+      JSON.stringify(params.locations),
+      JSON.stringify(params.concepts),
+      params.importanceScore,
+      params.credibilityScore,
+      params.confidenceScore,
+      params.urgency,
+      params.verificationLabel,
+      params.status,
+      now,
+      params.clusterId,
+      lease.lockName,
+      lease.ownerId,
+      lease.fencingToken,
+      now
+    )
+    .run();
+
+  if ((result.meta.changes ?? 0) === 0) {
+    throw new LeaseLostError(
+      `Lease lost while updating cluster #${params.clusterId} evaluation`
+    );
+  }
+}
+
+export async function getClusterPublicationEvents(
+  db: D1Database,
+  clusterId: number
+): Promise<PublicationEventRecord[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM publication_events
+       WHERE cluster_id = ?
+       ORDER BY revision_number ASC`
+    )
+    .bind(clusterId)
+    .all<PublicationEventRecord>();
+
+  return results;
+}
+
+export async function getQueuedClustersForPublishing(
+  db: D1Database,
+  limit: number = 2
+): Promise<StoryClusterRecord[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT sc.*
+       FROM story_clusters sc
+       WHERE sc.status = 'QUEUED'
+         AND NOT EXISTS (
+           SELECT 1 FROM delivery_outbox do
+           WHERE do.cluster_id = sc.id
+             AND do.revision_number = sc.latest_revision + 1
+         )
+       ORDER BY sc.importance_score DESC, sc.created_at ASC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<StoryClusterRecord>();
+
+  return results;
+}
+
+export async function saveClusterAiResult(
+  db: D1Database,
+  lease: LeaseContext,
+  clusterId: number,
+  aiPayloadJson: string | null,
+  attemptsIncrement: number,
+  now: number = Date.now()
+): Promise<void> {
+  const result = await db
+    .prepare(
+      `UPDATE story_clusters
+       SET
+         ai_payload_json = COALESCE(?, ai_payload_json),
+         ai_attempts = ai_attempts + ?,
+         updated_at = ?
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM leases
+           WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+         )`
+    )
+    .bind(
+      aiPayloadJson,
+      attemptsIncrement,
+      now,
+      clusterId,
+      lease.lockName,
+      lease.ownerId,
+      lease.fencingToken,
+      now
+    )
+    .run();
+
+  if ((result.meta.changes ?? 0) === 0) {
+    throw new LeaseLostError(
+      `Lease lost while saving AI payload for cluster #${clusterId}`
+    );
+  }
+}
+
+export async function listDispatchableOutbox(
+  db: D1Database,
+  limit: number = 2,
+  now: number = Date.now()
+): Promise<OutboxRecord[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM delivery_outbox
+       WHERE status = 'PENDING' AND next_retry_at <= ?
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .bind(now, limit)
+    .all<OutboxRecord>();
+
+  return results;
+}
+
+export async function getPublishedCounts(
+  db: D1Database,
+  now: number = Date.now()
+): Promise<{ lastHour: number; last24Hours: number }> {
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+  const [hourRes, dayRes] = await db.batch<{ count: number }>([
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM publication_events WHERE published_at >= ?`)
+      .bind(oneHourAgo),
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM publication_events WHERE published_at >= ?`)
+      .bind(oneDayAgo),
+  ]);
+
+  return {
+    lastHour: Number(hourRes?.results[0]?.count ?? 0),
+    last24Hours: Number(dayRes?.results[0]?.count ?? 0),
+  };
+}
+
+export async function getRuntimeNumber(
+  db: D1Database,
+  key: string
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT value_json FROM settings WHERE key = ?`)
+    .bind(key)
+    .first<{ value_json: string }>();
+
+  if (!row?.value_json) return 0;
+  try {
+    const parsed = Number(JSON.parse(row.value_json));
+    return Number.isFinite(parsed) ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function setRuntimeNumber(
+  db: D1Database,
+  key: string,
+  value: number,
+  now: number = Date.now()
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO settings (key, value_json, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value_json = excluded.value_json,
+         updated_at = excluded.updated_at`
+    )
+    .bind(key, JSON.stringify(value), now)
+    .run();
+}
+
+export async function cleanupOldOperationalRecords(
+  db: D1Database,
+  lease: LeaseContext,
+  now: number = Date.now()
+): Promise<{ logsDeleted: number; jobsDeleted: number; updatesDeleted: number }> {
+  const fourteenDaysAgo = now - 14 * 24 * 60 * 60 * 1000;
+  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const leaseParams = [lease.lockName, lease.ownerId, lease.fencingToken, now];
+
+  const [logsRes, jobsRes, updatesRes] = await db.batch([
+    db
+      .prepare(
+        `DELETE FROM system_logs
+         WHERE id IN (SELECT id FROM system_logs WHERE created_at < ? LIMIT 200)
+           AND EXISTS (
+             SELECT 1 FROM leases
+             WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+           )`
+      )
+      .bind(fourteenDaysAgo, ...leaseParams),
+    db
+      .prepare(
+        `DELETE FROM jobs
+         WHERE id IN (
+           SELECT id FROM jobs
+           WHERE status IN ('COMPLETED', 'FAILED') AND updated_at < ?
+           LIMIT 100
+         )
+           AND EXISTS (
+             SELECT 1 FROM leases
+             WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+           )`
+      )
+      .bind(sevenDaysAgo, ...leaseParams),
+    db
+      .prepare(
+        `DELETE FROM telegram_updates
+         WHERE update_id IN (
+           SELECT update_id FROM telegram_updates WHERE processed_at < ? LIMIT 200
+         )
+           AND EXISTS (
+             SELECT 1 FROM leases
+             WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+           )`
+      )
+      .bind(sevenDaysAgo, ...leaseParams),
+  ]);
+
+  return {
+    logsDeleted: logsRes?.meta.changes ?? 0,
+    jobsDeleted: jobsRes?.meta.changes ?? 0,
+    updatesDeleted: updatesRes?.meta.changes ?? 0,
   };
 }
