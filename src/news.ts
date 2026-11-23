@@ -1158,6 +1158,7 @@ async function analyzeAndEnqueuePublications(
       sources: buildSourceLinks(articles),
       eventTime: cluster.event_time,
       publishedAt: nowFn(),
+      channelId: targetChannel,
     });
 
     const outboxRow = await enqueueOutboxDelivery(

@@ -35,37 +35,63 @@ export interface FormatNewsPostInput {
   sources: readonly FormatSourceLink[];
   eventTime: number;
   publishedAt: number;
+  channelId?: string | null;
 }
 
 const CATEGORY_LABELS_EN: Record<NewsCategory, string> = {
   war_military: "War & Military",
-  missile_drone: "Missile & Drone Attacks",
-  geopolitics_diplomacy: "Geopolitics & Diplomacy",
-  terrorism_security: "Terrorism & Security",
-  nuclear: "Nuclear Developments",
-  cyber_infrastructure: "Cyber & Critical Infrastructure",
+  missile_drone: "Missile & Drone",
+  geopolitics_diplomacy: "Geopolitics",
+  terrorism_security: "Security & Terror",
+  nuclear: "Nuclear",
+  cyber_infrastructure: "Cyber & Infrastructure",
   sanctions_policy: "Sanctions & Policy",
-  energy_oil_gas: "Oil, Gas & Energy",
-  economy_finance: "Economy & Financial Crises",
+  energy_oil_gas: "Energy & Oil",
+  economy_finance: "Economy & Finance",
   central_banks: "Central Banks",
   natural_disasters: "Natural Disasters",
   public_health: "Public Health",
   elections_governance: "Elections & Governance",
 };
 
-const URGENCY_LABELS_FA: Record<UrgencyLevel, string> = {
-  critical: "🔴 بحرانی / فوری",
-  high: "🟠 بالا",
-  normal: "🟡 متوسط",
-  low: "⚪ عادی",
+const URGENCY_ICON: Record<UrgencyLevel, string> = {
+  critical: "🔴",
+  high: "🟠",
+  normal: "🟡",
+  low: "⚪",
 };
 
-const URGENCY_LABELS_EN: Record<UrgencyLevel, string> = {
-  critical: "🔴 CRITICAL",
-  high: "🟠 HIGH",
-  normal: "🟡 NORMAL",
-  low: "⚪ LOW",
+const URGENCY_TEXT_FA: Record<UrgencyLevel, string> = {
+  critical: "فوری / بحرانی",
+  high: "بالا",
+  normal: "متوسط",
+  low: "عادی",
 };
+
+const URGENCY_TEXT_EN: Record<UrgencyLevel, string> = {
+  critical: "CRITICAL",
+  high: "HIGH",
+  normal: "NORMAL",
+  low: "LOW",
+};
+
+function toHashtag(label: string): string {
+  const normalized = label
+    .replace(/[،,&/]+/g, " ")
+    .trim()
+    .replace(/\s+/g, "_");
+  return `#${normalized}`;
+}
+
+function cleanSourceDisplayName(rawName: string): string {
+  const cleaned = rawName
+    .replace(
+      /\s*[-–—|]\s*(?:All News|Top Stories|Global Perspective|Latest News|Breaking News)$/i,
+      ""
+    )
+    .trim();
+  return (cleaned || rawName).slice(0, 48);
+}
 
 function sanitizeHref(rawUrl: string): string | null {
   try {
@@ -79,64 +105,93 @@ function sanitizeHref(rawUrl: string): string | null {
   }
 }
 
-function formatTimestamp(ms: number, language: PublishLanguage): string {
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
+function formatCompactTimestamps(
+  eventTime: number,
+  publishedAt: number,
+  language: PublishLanguage
+): string {
+  const reportedDate = new Date(eventTime);
+  const publishedDate = new Date(publishedAt);
+  if (Number.isNaN(reportedDate.getTime()) || Number.isNaN(publishedDate.getTime())) {
+    return language === "fa" ? "🕒 زمان: —" : "🕒 Time: —";
   }
 
   try {
     if (language === "fa") {
-      const tehran = new Intl.DateTimeFormat("fa-IR-u-ca-persian", {
+      const dateFmt = new Intl.DateTimeFormat("fa-IR-u-ca-persian", {
         timeZone: "Asia/Tehran",
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
+      });
+      const timeFmt = new Intl.DateTimeFormat("fa-IR-u-ca-persian", {
+        timeZone: "Asia/Tehran",
         hour: "2-digit",
         minute: "2-digit",
         hour12: false,
-      }).format(date);
-      const utcTime = date.toISOString().slice(11, 16);
-      return `${tehran} تهران (${utcTime} UTC)`;
+      });
+
+      const repDateStr = dateFmt.format(reportedDate);
+      const pubDateStr = dateFmt.format(publishedDate);
+      const repTimeStr = timeFmt.format(reportedDate);
+      const pubTimeStr = timeFmt.format(publishedDate);
+
+      if (repDateStr === pubDateStr) {
+        return `🕒 گزارش ${repDateStr}، ${repTimeStr}  •  انتشار ${pubTimeStr} تهران`;
+      }
+      return `🕒 گزارش ${repDateStr}، ${repTimeStr}  •  انتشار ${pubDateStr}، ${pubTimeStr} تهران`;
     }
 
-    const utcStr = new Intl.DateTimeFormat("en-GB", {
+    const dateFmtEn = new Intl.DateTimeFormat("en-GB", {
       timeZone: "UTC",
-      year: "numeric",
-      month: "short",
       day: "2-digit",
+      month: "short",
+    });
+    const timeFmtEn = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "UTC",
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-    }).format(date);
-    return `${utcStr} UTC`;
+    });
+
+    const repDateStr = dateFmtEn.format(reportedDate);
+    const pubDateStr = dateFmtEn.format(publishedDate);
+    const repTimeStr = timeFmtEn.format(reportedDate);
+    const pubTimeStr = timeFmtEn.format(publishedDate);
+
+    if (repDateStr === pubDateStr) {
+      return `🕒 Reported ${repDateStr}, ${repTimeStr}  •  Published ${pubTimeStr} UTC`;
+    }
+    return `🕒 Reported ${repDateStr}, ${repTimeStr}  •  Published ${pubDateStr}, ${pubTimeStr} UTC`;
   } catch {
-    return date.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    const repIso = reportedDate.toISOString().slice(11, 16);
+    const pubIso = publishedDate.toISOString().slice(11, 16);
+    return `🕒 ${repIso} / ${pubIso} UTC`;
   }
 }
 
-function renderVerificationBanner(
+function renderVerificationLine(
   label: VerificationLabel,
   independentCount: number,
   language: PublishLanguage
 ): string {
   if (language === "fa") {
     if (label === "unverified") {
-      return "⚠️ <b>وضعیت تأیید: تأییدنشده — نیازمند احتیاط و تأیید مستقل</b>";
+      return "⚠️ <i>تأییدنشده — نیازمند احتیاط و تأیید مستقل</i>";
     }
     if (label === "single_source") {
-      return "⚠️ <b>وضعیت تأیید: تک‌منبعی — نیازمند تأیید مستقل</b>";
+      return "⚠️ <i>تک‌منبعی — نیازمند تأیید مستقل</i>";
     }
-    return `✅ <b>وضعیت تأیید: گزارش‌شده توسط ${independentCount} منبع مستقل</b>`;
+    return `✅ <i>تأییدشده توسط ${independentCount} منبع مستقل</i>`;
   }
 
   if (label === "unverified") {
-    return "⚠️ <b>Verification: UNVERIFIED — Requires independent confirmation</b>";
+    return "⚠️ <i>UNVERIFIED — Requires independent confirmation</i>";
   }
   if (label === "single_source") {
-    return "⚠️ <b>Verification: SINGLE SOURCE — Requires independent confirmation</b>";
+    return "⚠️ <i>SINGLE SOURCE — Requires independent confirmation</i>";
   }
-  return `✅ <b>Verification: Corroborated by ${independentCount} independent sources</b>`;
+  return `✅ <i>Corroborated by ${independentCount} independent sources</i>`;
 }
 
 function renderSourcesSection(
@@ -152,20 +207,20 @@ function renderSourcesSection(
     uniqueLinks.push(src);
   }
 
-  const header = language === "fa" ? "🔗 <b>منابع اصلی:</b>" : "🔗 <b>Sources:</b>";
+  const prefix = language === "fa" ? "🔗 <b>منبع:</b>" : "🔗 <b>Source:</b>";
   if (uniqueLinks.length === 0) {
-    return language === "fa" ? `${header} —` : `${header} None`;
+    return `${prefix} —`;
   }
 
   const renderedLinks = uniqueLinks
     .map((src) => {
       const safeHref = sanitizeHref(src.url);
-      const safeName = escapeHtml(src.name.slice(0, 60));
+      const safeName = escapeHtml(cleanSourceDisplayName(src.name));
       return safeHref ? `<a href="${safeHref}">${safeName}</a>` : safeName;
     })
-    .join(" | ");
+    .join("  •  ");
 
-  return `${header} ${renderedLinks}`;
+  return `${prefix} ${renderedLinks}`;
 }
 
 function truncatePlain(text: string, maxChars: number): string {
@@ -175,43 +230,63 @@ function truncatePlain(text: string, maxChars: number): string {
   return `${clean.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+function isNearDuplicateText(a: string, b: string): boolean {
+  const tokenize = (s: string): Set<string> =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+    );
+
+  const setA = tokenize(a);
+  const setB = tokenize(b);
+  if (setA.size === 0 || setB.size === 0) return true;
+
+  let overlap = 0;
+  for (const w of setA) {
+    if (setB.has(w)) overlap++;
+  }
+  const ratio = overlap / Math.min(setA.size, setB.size);
+  return ratio >= 0.6;
+}
+
 export function formatNewsPost(input: FormatNewsPostInput): string {
   const isFa = input.language === "fa";
 
   const titleText = truncatePlain(
     input.analysis?.localizedTitle || input.primaryTitle,
-    240
+    220
   );
   const categoryLabel = isFa
     ? CATEGORY_LABELS_FA[input.category]
     : CATEGORY_LABELS_EN[input.category];
-  const urgencyLabel = isFa
-    ? URGENCY_LABELS_FA[input.urgency]
-    : URGENCY_LABELS_EN[input.urgency];
+  const urgencyIcon = URGENCY_ICON[input.urgency];
+  const urgencyText = isFa
+    ? URGENCY_TEXT_FA[input.urgency]
+    : URGENCY_TEXT_EN[input.urgency];
 
   const headerLines: string[] = [];
   if (input.eventType === "UPDATE") {
     const revBanner = isFa
       ? `🔄 <b>به‌روزرسانی #${input.revisionNumber}</b>`
       : `🔄 <b>UPDATE #${input.revisionNumber}</b>`;
-    headerLines.push(revBanner);
-    if (input.updateReason) {
-      headerLines.push(
-        isFa
-          ? `<i>دلیل به‌روزرسانی: ${escapeHtml(truncatePlain(input.updateReason, 180))}</i>`
-          : `<i>Update trigger: ${escapeHtml(truncatePlain(input.updateReason, 180))}</i>`
-      );
-    }
+    headerLines.push(
+      input.updateReason
+        ? `${revBanner}  —  <i>${escapeHtml(truncatePlain(input.updateReason, 150))}</i>`
+        : revBanner
+    );
   }
 
-  headerLines.push(`<b>${escapeHtml(titleText)}</b>`);
+  headerLines.push(`${urgencyIcon} <b>${escapeHtml(titleText)}</b>`);
   headerLines.push(
     isFa
-      ? `🗂 <b>دسته:</b> ${escapeHtml(categoryLabel)} | ⚡ <b>فوریت:</b> ${urgencyLabel}`
-      : `🗂 <b>Category:</b> ${escapeHtml(categoryLabel)} | ⚡ <b>Urgency:</b> ${urgencyLabel}`
+      ? `${escapeHtml(toHashtag(categoryLabel))}  •  فوریت: ${escapeHtml(urgencyText)}`
+      : `${escapeHtml(toHashtag(categoryLabel))}  •  Urgency: ${escapeHtml(urgencyText)}`
   );
   headerLines.push(
-    renderVerificationBanner(
+    renderVerificationLine(
       input.verificationLabel,
       input.independentSourceCount,
       input.language
@@ -219,79 +294,82 @@ export function formatNewsPost(input: FormatNewsPostInput): string {
   );
 
   const footerLines: string[] = [
-    isFa
-      ? `📊 <b>شاخص‌ها:</b> اهمیت <b>${input.importanceScore}</b>/100 | اعتبار منبع <b>${input.credibilityScore}</b>/100 | اطمینان <b>${input.confidenceScore}</b>/100 (منابع مستقل: ${input.independentSourceCount})`
-      : `📊 <b>Scores:</b> Importance <b>${input.importanceScore}</b>/100 | Credibility <b>${input.credibilityScore}</b>/100 | Confidence <b>${input.confidenceScore}</b>/100 (Independent sources: ${input.independentSourceCount})`,
     renderSourcesSection(input.sources, input.language),
     isFa
-      ? `🕒 <b>زمان گزارش:</b> ${escapeHtml(formatTimestamp(input.eventTime, "fa"))}\n📤 <b>زمان انتشار:</b> ${escapeHtml(formatTimestamp(input.publishedAt, "fa"))}`
-      : `🕒 <b>Reported:</b> ${escapeHtml(formatTimestamp(input.eventTime, "en"))}\n📤 <b>Published:</b> ${escapeHtml(formatTimestamp(input.publishedAt, "en"))}`,
+      ? `📊 اهمیت <b>${input.importanceScore}</b>  •  اعتبار <b>${input.credibilityScore}</b>  •  اطمینان <b>${input.confidenceScore}</b> (${input.independentSourceCount} منبع مستقل)`
+      : `📊 Importance <b>${input.importanceScore}</b>  •  Credibility <b>${input.credibilityScore}</b>  •  Confidence <b>${input.confidenceScore}</b> (${input.independentSourceCount} independent)`,
+    escapeHtml(
+      formatCompactTimestamps(input.eventTime, input.publishedAt, input.language)
+    ),
   ];
 
+  const trimmedChannelId = input.channelId?.trim();
+  const channelSignature = trimmedChannelId
+    ? `\n\n${escapeHtml(trimmedChannelId)}`
+    : "";
+
   const headerBlock = headerLines.join("\n");
-  const footerBlock = footerLines.join("\n");
+  const footerBlock = `${footerLines.join("\n")}${channelSignature}`;
 
   const renderBody = (maxFieldChars: number): string => {
     if (input.analysis) {
       const a = input.analysis;
+      const summaryClean = truncatePlain(a.summary, maxFieldChars);
+      const whatHappenedClean = truncatePlain(a.whatHappened, maxFieldChars);
+
+      // Avoid repeating the same sentence twice when summary and whatHappened say the same thing
+      const factSection = isNearDuplicateText(summaryClean, whatHappenedClean)
+        ? escapeHtml(
+            whatHappenedClean.length >= summaryClean.length
+              ? whatHappenedClean
+              : summaryClean
+          )
+        : `${escapeHtml(summaryClean)}\n\n${escapeHtml(whatHappenedClean)}`;
+
       if (isFa) {
-        return [
-          "📰 <b>گزارش منابع (واقعیت‌های منتشرشده):</b>",
-          `• <b>خلاصه خبر:</b> ${escapeHtml(truncatePlain(a.summary, maxFieldChars))}`,
-          `• <b>چه اتفاقی افتاده:</b> ${escapeHtml(truncatePlain(a.whatHappened, maxFieldChars))}`,
-          "",
-          "🤖 <b>تحلیل هوش مصنوعی (جدا از گزارش منابع):</b>",
-          `• <b>چرا مهم است:</b> ${escapeHtml(truncatePlain(a.whyItMatters, maxFieldChars))}`,
-          `• <b>پیامدهای احتمالی:</b> ${escapeHtml(truncatePlain(a.potentialConsequences, maxFieldChars))}`,
-          `• <b>چه تحولاتی را دنبال کنیم:</b> ${escapeHtml(truncatePlain(a.whatToWatch, maxFieldChars))}`,
-          `• <b>موارد نامشخص / تأییدنشده:</b> ${escapeHtml(truncatePlain(a.uncertainOrUnconfirmed, maxFieldChars))}`,
+        const aiQuote = [
+          "🤖 <b>تحلیل هوش مصنوعی</b>",
+          `<b>• اهمیت:</b> ${escapeHtml(truncatePlain(a.whyItMatters, maxFieldChars))}`,
+          `<b>• پیامدها:</b> ${escapeHtml(truncatePlain(a.potentialConsequences, maxFieldChars))}`,
+          `<b>• پیگیری:</b> ${escapeHtml(truncatePlain(a.whatToWatch, maxFieldChars))}`,
+          `<b>• نکات نامشخص:</b> ${escapeHtml(truncatePlain(a.uncertainOrUnconfirmed, maxFieldChars))}`,
         ].join("\n");
+
+        return `${factSection}\n\n<blockquote>${aiQuote}</blockquote>`;
       }
 
-      return [
-        "📰 <b>Reported Facts (From Sources):</b>",
-        `• <b>Summary:</b> ${escapeHtml(truncatePlain(a.summary, maxFieldChars))}`,
-        `• <b>What happened:</b> ${escapeHtml(truncatePlain(a.whatHappened, maxFieldChars))}`,
-        "",
-        "🤖 <b>AI Assessment (Separate from Source Reporting):</b>",
-        `• <b>Why it matters:</b> ${escapeHtml(truncatePlain(a.whyItMatters, maxFieldChars))}`,
-        `• <b>Potential implications:</b> ${escapeHtml(truncatePlain(a.potentialConsequences, maxFieldChars))}`,
-        `• <b>What to watch:</b> ${escapeHtml(truncatePlain(a.whatToWatch, maxFieldChars))}`,
-        `• <b>Uncertain / Unconfirmed:</b> ${escapeHtml(truncatePlain(a.uncertainOrUnconfirmed, maxFieldChars))}`,
+      const aiQuoteEn = [
+        "🤖 <b>AI Assessment</b>",
+        `<b>• Why it matters:</b> ${escapeHtml(truncatePlain(a.whyItMatters, maxFieldChars))}`,
+        `<b>• Implications:</b> ${escapeHtml(truncatePlain(a.potentialConsequences, maxFieldChars))}`,
+        `<b>• What to watch:</b> ${escapeHtml(truncatePlain(a.whatToWatch, maxFieldChars))}`,
+        `<b>• Unconfirmed:</b> ${escapeHtml(truncatePlain(a.uncertainOrUnconfirmed, maxFieldChars))}`,
       ].join("\n");
+
+      return `${factSection}\n\n<blockquote>${aiQuoteEn}</blockquote>`;
     }
 
-    // Fallback template without AI analysis
+    // Clean fallback template without AI analysis
     const rawSummary = input.fallbackSummary
       ? truncatePlain(input.fallbackSummary, maxFieldChars * 2)
       : isFa
-        ? "خلاصه تکمیلی در فید منبع موجود نبود؛ جزئیات کامل را از لینک منابع زیر مطالعه کنید."
-        : "No additional summary provided in feed; see linked original sources below.";
+        ? "جزئیات تکمیلی در فید منبع درج نشده است؛ متن کامل را از لینک زیر بخوانید."
+        : "No additional summary provided in feed; read full details via the source link below.";
 
     if (isFa) {
-      return [
-        "📰 <b>خلاصه گزارش منبع:</b>",
-        escapeHtml(rawSummary),
-        "<i>(منتشرشده بدون تحلیل هوش مصنوعی)</i>",
-      ].join("\n");
+      return `${escapeHtml(rawSummary)}\n\n<i>(منتشرشده بدون تحلیل هوش مصنوعی)</i>`;
     }
-
-    return [
-      "📰 <b>Source Summary:</b>",
-      escapeHtml(rawSummary),
-      "<i>(Published without AI analysis)</i>",
-    ].join("\n");
+    return `${escapeHtml(rawSummary)}\n\n<i>(Published without AI analysis)</i>`;
   };
 
-  // Progressive field budget reduction guarantees <= 4096 chars without breaking HTML tags or losing links
-  for (const fieldBudget of [600, 400, 260, 160, 90]) {
+  // Progressive field budget reduction guarantees <= 4096 chars without breaking HTML tags or losing links/channel ID
+  for (const fieldBudget of [550, 380, 250, 160, 90]) {
     const assembled = `${headerBlock}\n\n${renderBody(fieldBudget)}\n\n${footerBlock}`;
     if (assembled.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
       return assembled;
     }
   }
 
-  // Extreme fallback if sources/header themselves were unusually large
   const minimal = `${headerBlock}\n\n${footerBlock}`;
   return minimal.length <= TELEGRAM_MAX_MESSAGE_LENGTH
     ? minimal

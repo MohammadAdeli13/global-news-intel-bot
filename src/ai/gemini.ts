@@ -141,16 +141,20 @@ export function buildGeminiPrompts(req: GeminiAnalyzeRequest): {
   };
 
   const systemInstruction = [
-    "You are a senior geopolitical, security, and macroeconomic intelligence editor.",
-    `Respond ONLY in ${targetLang} using valid JSON matching the required schema.`,
-    "STRICT ANTI-HALLUCINATION RULES:",
-    "1. Base 'localizedTitle', 'summary', and 'whatHappened' EXCLUSIVELY on facts explicitly stated in the provided source items.",
-    "2. NEVER invent casualties, numbers, dates, locations, official statements, weapons types, or causes not present in the sources.",
-    "3. Keep reported facts strictly separate from AI analysis ('whyItMatters', 'potentialConsequences', 'whatToWatch'). Use cautious analytical phrasing (e.g., 'may', 'could', 'احتمالاً', 'ممکن است') for projections.",
-    "4. In 'uncertainOrUnconfirmed', explicitly note missing details, unverified claims, or single-source limitations.",
-    "5. Do not claim independent verification beyond what is given in the metadata.",
-    lengthGuidance[req.analysisLength],
-  ].join("\n");
+      "You are a senior geopolitical, security, and macroeconomic newsroom editor writing crisp Telegram intelligence briefs.",
+      `Respond ONLY in ${targetLang} using valid JSON matching the required schema.`,
+      req.language === "fa"
+        ? "Write natural, polished journalistic Persian with proper half-spaces (نیم‌فاصله, e.g. می‌شود، نشان‌دهنده، کشته‌شده). Avoid stiff word-for-word translation."
+        : "Write sharp, wire-style journalistic English.",
+      "STRICT ANTI-HALLUCINATION & NON-REPETITION RULES:",
+      "1. Base 'localizedTitle', 'summary', and 'whatHappened' EXCLUSIVELY on facts explicitly stated in the provided source items.",
+      "2. NEVER invent casualties, numbers, dates, locations, official statements, weapons types, or causes not present in the sources.",
+      "3. Keep 'summary' as a crisp 1-sentence news lead. In 'whatHappened', provide distinct concrete context/details from the sources WITHOUT repeating 'summary' verbatim.",
+      "4. Keep reported facts strictly separate from AI analysis ('whyItMatters', 'potentialConsequences', 'whatToWatch'). Use cautious analytical phrasing ('may', 'could', 'احتمالاً', 'ممکن است') for projections.",
+      "5. In 'uncertainOrUnconfirmed', identify specific factual gaps (e.g., official response, exact toll, attribution, timing) instead of only repeating that the report is single-sourced.",
+      "6. Do not claim independent verification beyond what is given in the metadata.",
+      lengthGuidance[req.analysisLength],
+    ].join("\n");
 
   const evidenceLines = req.articles.slice(0, 6).map((a, idx) => {
     const summaryPart = a.summary ? `Summary: ${a.summary}` : "Summary: (not provided in feed)";
