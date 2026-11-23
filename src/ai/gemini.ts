@@ -43,6 +43,7 @@ export interface GeminiAnalyzeRequest {
   apiKey: string;
   primaryModel: string;
   fallbackModel?: string;
+  emergencyModel?: string;
   language: PublishLanguage;
   analysisLength: AnalysisLength;
   category: NewsCategory;
@@ -52,6 +53,7 @@ export interface GeminiAnalyzeRequest {
   updateReason?: string | null;
   articles: readonly GeminiArticleEvidence[];
   timeoutMs?: number;
+  retryDelayMs?: number;
   fetchImpl?: GeminiFetchLike;
 }
 
@@ -73,10 +75,12 @@ export type GeminiAnalyzeResult =
         | "NETWORK_ERROR";
       retryAfterSeconds?: number;
       detail: string;
+      modelErrors: string[];
       attempts: number;
     };
 
-export const GEMINI_TIMEOUT_MS = 12_000;
+export const GEMINI_TIMEOUT_MS = 20_000;
+export const GEMINI_503_RETRY_DELAY_MS = 2_000;
 export const GEMINI_DEFAULT_COOLDOWN_SECONDS = 300; // 5 minutes after 429
 
 const RUNTIME_AI_COOLDOWN_KEY = "_runtime_ai_cooldown_until";
@@ -182,6 +186,47 @@ export function buildGeminiPrompts(req: GeminiAnalyzeRequest): {
   return { systemInstruction, userPrompt };
 }
 
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractCleanErrorMessage(rawText: string): string {
+  const compact = rawText.replace(/\s+/g, " ").trim();
+  if (!compact) return "empty response";
+
+  try {
+    const parsed = JSON.parse(rawText) as {
+      error?: { message?: unknown; status?: unknown };
+    };
+    const status =
+      typeof parsed?.error?.status === "string"
+        ? parsed.error.status.replace(/\s+/g, " ").trim()
+        : "";
+    const msg =
+      typeof parsed?.error?.message === "string"
+        ? parsed.error.message.replace(/\s+/g, " ").trim()
+        : "";
+
+    if (status && msg) return `${status}: ${msg}`.slice(0, 90);
+    if (msg) return msg.slice(0, 90);
+    if (status) return status.slice(0, 60);
+  } catch {
+    // Response is plain text rather than JSON
+  }
+
+  return compact.slice(0, 90);
+}
+
+type SingleModelFailure = {
+  ok: false;
+  code: "RATE_LIMITED" | "API_ERROR" | "INVALID_OUTPUT" | "NETWORK_ERROR";
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+  summary: string;
+  detail: string;
+};
+
 export async function analyzeClusterWithGemini(
   req: GeminiAnalyzeRequest
 ): Promise<GeminiAnalyzeResult> {
@@ -190,6 +235,7 @@ export async function analyzeClusterWithGemini(
       ok: false,
       code: "API_ERROR",
       detail: "Missing GEMINI_API_KEY",
+      modelErrors: ["Missing GEMINI_API_KEY"],
       attempts: 0,
     };
   }
@@ -199,65 +245,120 @@ export async function analyzeClusterWithGemini(
       ok: false,
       code: "INVALID_OUTPUT",
       detail: "No source articles provided for analysis",
+      modelErrors: ["No source articles provided"],
       attempts: 0,
     };
   }
 
-  const modelsToTry = [req.primaryModel.trim()];
-  const fb = req.fallbackModel?.trim();
-  if (fb && fb !== modelsToTry[0]) {
-    modelsToTry.push(fb);
+  const candidateModels = [
+    req.primaryModel.trim(),
+    req.fallbackModel?.trim() ?? "",
+    req.emergencyModel?.trim() ?? "",
+  ];
+  const modelsToTry: string[] = [];
+  for (const model of candidateModels) {
+    if (model && !modelsToTry.includes(model)) {
+      modelsToTry.push(model);
+    }
   }
+
+  const emergencySlug = req.emergencyModel?.trim() || "";
+  const retryDelayMs = req.retryDelayMs ?? GEMINI_503_RETRY_DELAY_MS;
+  const maxOutputTokens =
+    req.analysisLength === "detailed"
+      ? 1200
+      : req.analysisLength === "medium"
+        ? 900
+        : 650;
 
   const prompts = buildGeminiPrompts(req);
   let attempts = 0;
-  let lastError: Extract<GeminiAnalyzeResult, { ok: false }> = {
-    ok: false,
-    code: "API_ERROR",
-    detail: "No Gemini model attempted",
-    attempts: 0,
-  };
+  const modelErrors: string[] = [];
+  let allRateLimited = true;
+  let maxRetryAfterSeconds: number | undefined;
+  let lastFailure: SingleModelFailure | null = null;
 
   for (const model of modelsToTry) {
-    attempts++;
-    const singleResult = await callSingleGeminiModel({
-      apiKey: req.apiKey,
-      model,
-      systemInstruction: prompts.systemInstruction,
-      userPrompt: prompts.userPrompt,
-      maxOutputTokens:
-        req.analysisLength === "detailed"
-          ? 1200
-          : req.analysisLength === "medium"
-            ? 900
-            : 650,
-      timeoutMs: req.timeoutMs ?? GEMINI_TIMEOUT_MS,
-      fetchImpl: req.fetchImpl,
-    });
+    const isEmergencyModel =
+      Boolean(emergencySlug) && model === emergencySlug && modelsToTry.length > 1;
+    // Allow 1 short retry on HTTP 503 for primary/fallback models; skip retry on emergency model to protect its small daily quota
+    const max503Retries = isEmergencyModel ? 0 : 1;
 
-    if (singleResult.ok) {
-      return {
-        ok: true,
-        modelUsed: model,
-        analysis: singleResult.analysis,
-        attempts,
-      };
+    let result:
+      | { ok: true; analysis: GeminiAnalysisOutput }
+      | SingleModelFailure;
+    let retriesUsed = 0;
+
+    while (true) {
+      attempts++;
+      result = await callSingleGeminiModel({
+        apiKey: req.apiKey,
+        model,
+        systemInstruction: prompts.systemInstruction,
+        userPrompt: prompts.userPrompt,
+        maxOutputTokens,
+        timeoutMs: req.timeoutMs ?? GEMINI_TIMEOUT_MS,
+        fetchImpl: req.fetchImpl,
+      });
+
+      if (result.ok) {
+        return {
+          ok: true,
+          modelUsed: model,
+          analysis: result.analysis,
+          attempts,
+        };
+      }
+
+      if (result.httpStatus === 503 && retriesUsed < max503Retries) {
+        retriesUsed++;
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      break;
     }
 
-    lastError = { ...singleResult, attempts };
+    const retryNote = retriesUsed > 0 ? ` (after ${retriesUsed} retry)` : "";
+    modelErrors.push(`${model}: ${result.summary}${retryNote}`);
+    lastFailure = result;
 
-    // Only switch to fallback model on rate-limit, transient server/network error, or 404 model issue
-    const shouldTryFallback =
-      singleResult.code === "RATE_LIMITED" ||
-      singleResult.code === "NETWORK_ERROR" ||
-      singleResult.code === "API_ERROR";
+    if (result.code !== "RATE_LIMITED") {
+      allRateLimited = false;
+    } else if (typeof result.retryAfterSeconds === "number") {
+      maxRetryAfterSeconds = Math.max(
+        maxRetryAfterSeconds ?? 0,
+        result.retryAfterSeconds
+      );
+    }
 
-    if (!shouldTryFallback) {
+    // Fail over to next model on transient/quota/API errors
+    const shouldTryNextModel =
+      result.code === "RATE_LIMITED" ||
+      result.code === "NETWORK_ERROR" ||
+      result.code === "API_ERROR";
+
+    if (!shouldTryNextModel) {
       break;
     }
   }
 
-  return lastError;
+  const finalCode =
+    allRateLimited && modelErrors.length > 0
+      ? "RATE_LIMITED"
+      : lastFailure?.code ?? "API_ERROR";
+
+  return {
+    ok: false,
+    code: finalCode,
+    retryAfterSeconds:
+      finalCode === "RATE_LIMITED"
+        ? maxRetryAfterSeconds ?? GEMINI_DEFAULT_COOLDOWN_SECONDS
+        : undefined,
+    detail: modelErrors.join(" | ") || "No Gemini model attempted",
+    modelErrors,
+    attempts,
+  };
 }
 
 async function callSingleGeminiModel(params: {
@@ -268,15 +369,13 @@ async function callSingleGeminiModel(params: {
   maxOutputTokens: number;
   timeoutMs: number;
   fetchImpl?: GeminiFetchLike;
-}): Promise<
-  | { ok: true; analysis: GeminiAnalysisOutput }
-  | Omit<Extract<GeminiAnalyzeResult, { ok: false }>, "attempts">
-> {
+}): Promise<{ ok: true; analysis: GeminiAnalysisOutput } | SingleModelFailure> {
   const fetchImpl: GeminiFetchLike =
     params.fetchImpl ?? ((url, init) => fetch(url, init));
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(params.model)}:generateContent`;
 
+  // Per official Gemini 3.5+ documentation, deprecated sampling params (temperature, topP, topK) are omitted
   const body = {
     systemInstruction: {
       parts: [{ text: params.systemInstruction }],
@@ -288,7 +387,6 @@ async function callSingleGeminiModel(params: {
       },
     ],
     generationConfig: {
-      temperature: 0.2,
       maxOutputTokens: params.maxOutputTokens,
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
@@ -319,19 +417,25 @@ async function callSingleGeminiModel(params: {
           ? Math.min(Math.ceil(parsedRetry), 3600)
           : GEMINI_DEFAULT_COOLDOWN_SECONDS;
 
+      const cleanMsg = extractCleanErrorMessage(rawText);
       return {
         ok: false,
         code: "RATE_LIMITED",
+        httpStatus: 429,
         retryAfterSeconds,
-        detail: `Gemini HTTP 429 on ${params.model}: ${rawText.slice(0, 200)}`,
+        summary: `HTTP 429 (${cleanMsg})`,
+        detail: `Gemini HTTP 429 on ${params.model}: ${cleanMsg}`,
       };
     }
 
     if (!response.ok) {
+      const cleanMsg = extractCleanErrorMessage(rawText);
       return {
         ok: false,
         code: "API_ERROR",
-        detail: `Gemini HTTP ${response.status} on ${params.model}: ${rawText.slice(0, 200)}`,
+        httpStatus: response.status,
+        summary: `HTTP ${response.status} (${cleanMsg})`,
+        detail: `Gemini HTTP ${response.status} on ${params.model}: ${cleanMsg}`,
       };
     }
 
@@ -340,16 +444,22 @@ async function callSingleGeminiModel(params: {
       return {
         ok: false,
         code: "INVALID_OUTPUT",
+        httpStatus: response.status,
+        summary: `INVALID_OUTPUT (${parsed.detail})`,
         detail: parsed.detail,
       };
     }
 
     return { ok: true, analysis: parsed.analysis };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message =
+      error instanceof Error
+        ? error.message.replace(/\s+/g, " ").trim()
+        : String(error);
     return {
       ok: false,
       code: "NETWORK_ERROR",
+      summary: `TIMEOUT/NET (${message.slice(0, 70)})`,
       detail: `Gemini network/timeout error on ${params.model}: ${message}`,
     };
   } finally {

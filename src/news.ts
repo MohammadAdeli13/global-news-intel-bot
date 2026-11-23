@@ -1070,6 +1070,7 @@ async function analyzeAndEnqueuePublications(
           apiKey: env.GEMINI_API_KEY,
           primaryModel: settings.geminiModel,
           fallbackModel: settings.geminiFallbackModel,
+          emergencyModel: settings.geminiEmergencyModel,
           language: settings.language,
           analysisLength: settings.analysisLength,
           category: cluster.category,
@@ -1114,8 +1115,13 @@ async function analyzeAndEnqueuePublications(
             env.DB,
             "WARN",
             "gemini",
-            `Gemini analysis failed (${aiRes.code}): ${aiRes.detail.slice(0, 160)}`,
-            { clusterId: cluster.id, code: aiRes.code },
+            `Gemini failed (${aiRes.code}): ${aiRes.detail.slice(0, 260)}`,
+            {
+              clusterId: cluster.id,
+              code: aiRes.code,
+              attempts: aiRes.attempts,
+              modelErrors: aiRes.modelErrors,
+            },
             nowFn()
           );
           if (settings.geminiFallbackBehavior === "queue") {

@@ -719,6 +719,7 @@ function renderAiPanel(settings: BotSettings): {
     `• وضعیت: <b>${settings.geminiEnabled ? "فعال ✅" : "غیرفعال ❌"}</b>`,
     `• مدل اصلی: <code>${escapeHtml(settings.geminiModel)}</code>`,
     `• مدل پشتیبان: <code>${escapeHtml(settings.geminiFallbackModel)}</code>`,
+    `• مدل اضطراری سوم: <code>${escapeHtml(settings.geminiEmergencyModel)}</code>`,
     `• سقف روزانه نرم: <b>${settings.geminiDailyLimit}</b> درخواست`,
     `• طول تحلیل: <b>${lenMap[settings.analysisLength]}</b>`,
     `• رفتار هنگام خطا/اتمام سهمیه: <b>${fbMap[settings.geminiFallbackBehavior]}</b>`,
@@ -973,7 +974,8 @@ async function renderStatusView(
   if (recentLogs.length > 0) {
     lines.push("", "📝 <b>آخرین رویدادها:</b>");
     for (const log of recentLogs) {
-      lines.push(`• [${log.level}] <code>${escapeHtml(log.component)}</code>: ${escapeHtml(log.message.slice(0, 80))}`);
+      const cleanMsg = log.message.replace(/\s+/g, " ").trim().slice(0, 150);
+      lines.push(`• [${log.level}] <code>${escapeHtml(log.component)}</code>: ${escapeHtml(cleanMsg)}`);
     }
   }
 

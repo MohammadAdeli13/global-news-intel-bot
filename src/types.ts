@@ -51,6 +51,7 @@ export interface BotSettings {
   geminiEnabled: boolean;
   geminiModel: string;
   geminiFallbackModel: string;
+  geminiEmergencyModel: string;
   geminiDailyLimit: number;
   geminiFallbackBehavior: GeminiFallbackBehavior;
   analysisLength: AnalysisLength;
@@ -76,6 +77,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   // Exact API model slug will be verified from Google AI Studio in Phase 6
   geminiModel: "gemini-3.5-flash-lite",
   geminiFallbackModel: "gemini-3.1-flash-lite",
+  geminiEmergencyModel: "gemini-3.6-flash",
   geminiDailyLimit: 400,
   geminiFallbackBehavior: "publish_without_ai",
   analysisLength: "short",
