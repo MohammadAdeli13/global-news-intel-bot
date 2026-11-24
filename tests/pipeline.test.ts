@@ -415,4 +415,129 @@ describe("Phase 7 End-to-End Scheduled Pipeline Integration", () => {
     expect(runOnce.jobProcessed).toContain("RUN_ONCE");
     expect(reports[1]).toContain("گزارش اجرای فوری");
   });
+
+  it("uses sendPhoto for short posts (<=1024 chars) and sendMessage with large top preview for long posts (>1024 chars)", async () => {
+    const urlA = "https://source-media.example.com/rss.xml";
+    const photoUrl = "https://cdn.example.com/photo.jpg";
+
+    await upsertSource(db, {
+      name: "BBC World",
+      url: urlA,
+      type: "rss",
+      publisherGroup: "bbc",
+      credibilityTier: 1,
+      baseCredibility: 88,
+    });
+    await setSetting(db, "includeImages", true, currentTime);
+
+    const recordedCalls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let msgSeq = 1200;
+    const telegramMock: FetchLike = async (url, init) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+      recordedCalls.push({ method, body });
+      const messageId = msgSeq++;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, result: { message_id: messageId } };
+        },
+        async text() {
+          return JSON.stringify({ ok: true, result: { message_id: messageId } });
+        },
+      };
+    };
+
+    // Case 1: Short post (<= 1024 chars, without AI) -> MUST dispatch via sendPhoto
+    await setSetting(db, "geminiEnabled", false, currentTime);
+    const shortFeedXml = `<?xml version="1.0"?>
+    <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+      <channel>
+        <item>
+          <title>Breaking: Ballistic missile strike hits port infrastructure, dozens killed</title>
+          <link>https://source-media.example.com/short-story</link>
+          <description>Emergency crews responded after missiles struck fuel depots.</description>
+          <pubDate>Thu, 19 Nov 2026 11:50:00 GMT</pubDate>
+          <media:content url="${photoUrl}" medium="image" />
+        </item>
+      </channel>
+    </rss>`;
+
+    const shortRun = await runScheduledPipeline(env, {
+      fetchFeed: makeFeedMock({ [urlA]: shortFeedXml }),
+      fetchTelegram: telegramMock,
+      now: () => currentTime,
+    });
+
+    expect(shortRun.postsSent).toBe(1);
+    expect(recordedCalls[0]?.method).toBe("sendPhoto");
+    expect(recordedCalls[0]?.body.photo).toBe(photoUrl);
+    expect(String(recordedCalls[0]?.body.caption).length).toBeLessThanOrEqual(1024);
+
+    // Case 2: Long post (> 1024 chars, with full AI analysis) -> MUST dispatch via sendMessage with large top preview
+    currentTime += 10 * 60 * 1000;
+    await setSetting(db, "geminiEnabled", true, currentTime);
+
+    const longAiPayload: GeminiAnalysisOutput = {
+      localizedTitle: "زمین‌لرزه ۷.۸ ریشتری و صدور هشدار سونامی در سواحل اقیانوس آرام",
+      summary:
+        "زمین‌لرزه‌ای شدید به بزرگی ۷.۸ ریشتر بامداد امروز مناطق ساحلی را لرزاند و باعث صدور فوری هشدار سونامی و تخلیه گسترده ساکنان مناطق کم‌ارتفاع در چند استان ساحلی شد.",
+      whatHappened:
+        "مراکز لرزه‌نگاری کانون این زمین‌لرزه را در عمق کم بستر دریا ثبت کردند و تیم‌های امداد و مدیریت بحران بلافاصله پس از قطع برق و آسیب به بنادر و جاده‌های ساحلی به حالت آماده‌باش کامل درآمدند.",
+      whyItMatters:
+        "شدت بالای لرزش در مجاورت بنادر تجاری و زیرساخت‌های حیاتی انرژی می‌تواند زنجیره تأمین دریایی و حمل‌ونقل منطقه‌ای را برای چند روز مختل کرده و خسارت اقتصادی قابل‌توجهی ایجاد کند.",
+      potentialConsequences:
+        "احتمال وقوع پس‌لرزه‌های قدرتمند، اختلال موقت در فعالیت کشتیرانی و افزایش هزینه‌های بیمه و لجستیک در بنادر آسیب‌دیده طی روزهای آینده وجود دارد.",
+      whatToWatch:
+        "گزارش رسمی مرکز هشدار سونامی درباره ارتفاع امواج، آمار دقیق خسارات زیرساختی بنادر، وضعیت شبکه‌های برق و مخابرات و اطلاعیه‌های امدادرسانی دولت.",
+      uncertainOrUnconfirmed:
+        "آمار نهایی تلفات جانی، میزان دقیق خسارت به تأسیسات بندری و زمان بازگشایی کامل مسیرهای دریایی هنوز به‌طور رسمی و مستقل تأیید نشده است.",
+    };
+
+    const longGeminiMock: GeminiFetchLike = async () => ({
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          candidates: [
+            {
+              content: { parts: [{ text: JSON.stringify(longAiPayload) }] },
+              finishReason: "STOP",
+            },
+          ],
+        });
+      },
+    });
+
+    const longFeedXml = `<?xml version="1.0"?>
+    <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+      <channel>
+        <item>
+          <title>Magnitude 7.8 earthquake triggers tsunami warning across Pacific coastal ports</title>
+          <link>https://source-media.example.com/long-quake-story</link>
+          <description>Authorities ordered mass coastal evacuations after a major shallow earthquake struck offshore.</description>
+          <pubDate>Thu, 19 Nov 2026 12:05:00 GMT</pubDate>
+          <media:content url="${photoUrl}" medium="image" />
+        </item>
+      </channel>
+    </rss>`;
+
+    const longRun = await runScheduledPipeline(env, {
+      fetchFeed: makeFeedMock({ [urlA]: longFeedXml }),
+      fetchGemini: longGeminiMock,
+      fetchTelegram: telegramMock,
+      now: () => currentTime,
+    });
+
+    expect(longRun.postsSent).toBe(1);
+    expect(recordedCalls[1]?.method).toBe("sendMessage");
+    expect(String(recordedCalls[1]?.body.text).length).toBeGreaterThan(1024);
+    expect(recordedCalls[1]?.body.link_preview_options).toEqual({
+      is_disabled: false,
+      url: photoUrl,
+      prefer_large_media: true,
+      show_above_text: true,
+    });
+  });
 });

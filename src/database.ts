@@ -302,9 +302,9 @@ export async function createStoryCluster(
          primary_title, category, entities_json, locations_json, concepts_json,
          event_time, raw_article_count, independent_source_count,
          importance_score, credibility_score, confidence_score,
-         urgency, verification_label, status, created_at, updated_at
+         urgency, verification_label, status, image_url, created_at, updated_at
        )
-       SELECT ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM leases
          WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
@@ -324,6 +324,7 @@ export async function createStoryCluster(
       input.urgency,
       input.verificationLabel,
       input.status ?? "COLLECTING",
+      input.imageUrl ?? null,
       now,
       now,
       lease.lockName,
@@ -349,9 +350,9 @@ export async function insertArticleAndSyncCluster(
     .prepare(
       `INSERT OR IGNORE INTO articles (
          cluster_id, source_id, url_hash, canonical_url, title, summary, author,
-         publisher_group, detected_wire_name, effective_origin_key, published_at, fetched_at
+         publisher_group, detected_wire_name, effective_origin_key, published_at, fetched_at, image_url
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM leases
          WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
@@ -370,6 +371,7 @@ export async function insertArticleAndSyncCluster(
       input.effectiveOriginKey,
       input.publishedAt,
       now,
+      input.imageUrl ?? null,
       lease.lockName,
       lease.ownerId,
       lease.fencingToken,
@@ -428,6 +430,7 @@ export async function insertArticleAndSyncCluster(
        SET
          raw_article_count = (SELECT COUNT(*) FROM articles WHERE cluster_id = ?),
          independent_source_count = (SELECT COUNT(*) FROM cluster_sources WHERE cluster_id = ?),
+         image_url = COALESCE(image_url, ?),
          updated_at = ?
        WHERE id = ?
          AND EXISTS (
@@ -438,6 +441,7 @@ export async function insertArticleAndSyncCluster(
     .bind(
       input.clusterId,
       input.clusterId,
+      input.imageUrl ?? null,
       now,
       input.clusterId,
       lease.lockName,
@@ -501,9 +505,9 @@ export async function enqueueOutboxDelivery(
       `INSERT OR IGNORE INTO delivery_outbox (
          dedup_key, cluster_id, revision_number, event_type, update_reason,
          channel_id, reply_to_message_id, language, has_ai_analysis,
-         rendered_html, status, next_retry_at, created_at, updated_at
+         rendered_html, image_url, status, next_retry_at, created_at, updated_at
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM leases
          WHERE lock_name = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
@@ -521,6 +525,7 @@ export async function enqueueOutboxDelivery(
       input.language,
       input.hasAiAnalysis ? 1 : 0,
       input.renderedHtml,
+      input.imageUrl ?? null,
       now,
       now,
       now,

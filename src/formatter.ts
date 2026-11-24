@@ -304,9 +304,10 @@ export function formatNewsPost(input: FormatNewsPostInput): string {
   ];
 
   const trimmedChannelId = input.channelId?.trim();
-  const channelSignature = trimmedChannelId
-    ? `\n\n${escapeHtml(trimmedChannelId)}`
-    : "";
+  const channelSignature =
+    trimmedChannelId && trimmedChannelId.startsWith("@")
+      ? `\n\n${escapeHtml(trimmedChannelId)}`
+      : "";
 
   const headerBlock = headerLines.join("\n");
   const footerBlock = `${footerLines.join("\n")}${channelSignature}`;

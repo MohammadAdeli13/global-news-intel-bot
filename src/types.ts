@@ -66,6 +66,7 @@ export interface BotSettings {
   gdeltEnabled: boolean;
   isPaused: boolean;
   language: PublishLanguage;
+  includeImages: boolean;
 }
 
 export const DEFAULT_SETTINGS: BotSettings = {
@@ -92,6 +93,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   gdeltEnabled: false,
   isPaused: false,
   language: "fa",
+  includeImages: true,
 };
 
 export interface LeaseRecord {
@@ -164,6 +166,7 @@ export interface StoryClusterRecord {
   ai_attempts: number;
   created_at: number;
   updated_at: number;
+  image_url: string | null;
 }
 
 export interface CreateClusterInput {
@@ -179,6 +182,7 @@ export interface CreateClusterInput {
   urgency: UrgencyLevel;
   verificationLabel: VerificationLabel;
   status?: ClusterStatus;
+  imageUrl?: string | null;
 }
 
 export interface InsertArticleInput {
@@ -195,6 +199,7 @@ export interface InsertArticleInput {
   originType: OriginType;
   attributionConfidence: AttributionConfidence;
   publishedAt: number;
+  imageUrl?: string | null;
 }
 
 export interface ClusterSourceRecord {
@@ -236,6 +241,7 @@ export interface OutboxRecord {
   created_at: number;
   updated_at: number;
   sent_at: number | null;
+  image_url: string | null;
 }
 
 export interface EnqueueOutboxInput {
@@ -248,6 +254,7 @@ export interface EnqueueOutboxInput {
   language: PublishLanguage;
   hasAiAnalysis: boolean;
   renderedHtml: string;
+  imageUrl?: string | null;
 }
 
 export interface PublicationSnapshot {

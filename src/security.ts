@@ -136,10 +136,13 @@ export function validateChannelTarget(raw: string): ValidationResult<string> {
   if (/^-100\d{5,20}$/.test(trimmed)) {
     return { ok: true, value: trimmed };
   }
+  if (/^-\d{5,20}$/.test(trimmed)) {
+    return { ok: true, value: trimmed };
+  }
   return {
     ok: false,
     reason:
-      "فرمت کانال نامعتبر است. برای کانال عمومی از @username (حداقل ۵ کاراکتر) و برای کانال خصوصی از شناسه عددی با پیشوند -100 استفاده کنید.",
+      "فرمت مقصد نامعتبر است. از @username (کانال یا سوپرگروه عمومی)، شناسه -100... (کانال خصوصی یا سوپرگروه) یا شناسه منفی گروه (-123456...) استفاده کنید.",
   };
 }
 
@@ -149,4 +152,22 @@ export function escapeHtml(input: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+const NON_IMAGE_EXTENSIONS = /\.(?:mp4|webm|mov|avi|mp3|wav|ogg|m4a|pdf|zip|xml|rss|json)$/i;
+
+export function validateImageUrl(rawUrl: string | null | undefined): string | null {
+  if (!rawUrl) return null;
+  const check = validateFeedUrl(rawUrl);
+  if (!check.ok) return null;
+
+  try {
+    const parsed = new URL(check.value);
+    if (NON_IMAGE_EXTENSIONS.test(parsed.pathname)) {
+      return null;
+    }
+    return check.value;
+  } catch {
+    return null;
+  }
 }

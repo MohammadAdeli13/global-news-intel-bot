@@ -35,6 +35,11 @@ function createMockTelegramFetch(
       responsePayload = overrides[method];
     } else if (method === "getMe") {
       responsePayload = { ok: true, result: { id: 999, is_bot: true, first_name: "NewsBot" } };
+    } else if (method === "getChat") {
+      responsePayload = {
+        ok: true,
+        result: { id: -1001987654321, type: "channel", title: "World Intel" },
+      };
     } else if (method === "getChatMember") {
       responsePayload = {
         ok: true,
@@ -323,5 +328,82 @@ describe("Phase 3 Webhook Security & Admin Panel", () => {
 
     const logs = await getRecentLogs(db, 3);
     expect(logs.some((l) => l.component === "outbox_manual_retry")).toBe(true);
+  });
+
+  it("supports /setchannel for a standard group (-987654321) when bot is a regular member and rejects restricted bots", async () => {
+    const groupMock = createMockTelegramFetch({
+      getChat: {
+        ok: true,
+        result: { id: -987654321, type: "group", title: "News Desk Group" },
+      },
+      getChatMember: {
+        ok: true,
+        result: { status: "member" },
+      },
+    });
+
+    await handleTelegramUpdate(
+      makeMessageUpdate(40, 111222333, "/setchannel -987654321"),
+      env,
+      { fetchImpl: groupMock.fetchImpl }
+    );
+
+    expect((await getSettings(db)).targetChannel).toBe("-987654321");
+    expect(groupMock.calls.some((c) => c.method === "getChat")).toBe(true);
+    const confirmationMsg = groupMock.calls.find((c) => c.method === "sendMessage");
+    expect(String(confirmationMsg?.body.text)).toContain("گروه");
+
+    // Restricted bot with can_send_messages: false must be rejected
+    const restrictedGroupMock = createMockTelegramFetch({
+      getChat: {
+        ok: true,
+        result: { id: -987654322, type: "group", title: "Read-only Group" },
+      },
+      getChatMember: {
+        ok: true,
+        result: { status: "restricted", can_send_messages: false },
+      },
+    });
+
+    await handleTelegramUpdate(
+      makeMessageUpdate(41, 111222333, "/setchannel -987654322"),
+      env,
+      { fetchImpl: restrictedGroupMock.fetchImpl }
+    );
+    expect((await getSettings(db)).targetChannel).toBe("-987654321");
+  });
+
+  it("responds to /chatid inside a group only for admins and ignores non-admins", async () => {
+    const { fetchImpl, calls } = createMockTelegramFetch();
+
+    const nonAdminGroupUpdate: TelegramUpdate = {
+      update_id: 42,
+      message: {
+        message_id: 42,
+        from: { id: 999888777, is_bot: false, first_name: "Stranger" },
+        chat: { id: -987654321, type: "group", title: "News Desk Group" },
+        date: 1700000000,
+        text: "/chatid",
+      },
+    };
+    await handleTelegramUpdate(nonAdminGroupUpdate, env, { fetchImpl });
+    expect(calls).toHaveLength(0);
+
+    const adminGroupUpdate: TelegramUpdate = {
+      update_id: 43,
+      message: {
+        message_id: 43,
+        from: { id: 111222333, is_bot: false, first_name: "Admin" },
+        chat: { id: -987654321, type: "group", title: "News Desk Group" },
+        date: 1700000001,
+        text: "/chatid@GlobalNewsBot",
+      },
+    };
+    await handleTelegramUpdate(adminGroupUpdate, env, { fetchImpl });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("sendMessage");
+    expect(calls[0]?.body.chat_id).toBe(-987654321);
+    expect(String(calls[0]?.body.text)).toContain("-987654321");
+    expect(String(calls[0]?.body.text)).toContain("/setchannel -987654321");
   });
 });

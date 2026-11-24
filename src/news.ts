@@ -829,6 +829,7 @@ async function ingestAndClusterNews(
           confidenceScore: initialScore.confidenceScore,
           urgency: initialScore.urgency,
           verificationLabel: initialScore.verificationLabel,
+          imageUrl: entry.item.imageUrl,
           status: "COLLECTING",
         },
         nowFn()
@@ -863,6 +864,7 @@ async function ingestAndClusterNews(
         originType: attribution.originType,
         attributionConfidence: attribution.attributionConfidence,
         publishedAt: entry.item.publishedAt,
+        imageUrl: entry.item.imageUrl,
       },
       nowFn()
     );
@@ -1173,6 +1175,7 @@ async function analyzeAndEnqueuePublications(
         replyToMessageId: task.replyToMessageId,
         language: settings.language,
         hasAiAnalysis: analysis !== null,
+        imageUrl: settings.includeImages ? cluster.image_url : null,
         renderedHtml: html,
       },
       nowFn()
@@ -1243,12 +1246,11 @@ async function dispatchPendingOutbox(
     );
     if (!claimed) continue;
 
-    const sendRes = await telegram.sendMessage({
+    const sendRes = await telegram.sendNewsPostWithMedia({
       chatId: claimed.channel_id,
-      text: claimed.rendered_html,
-      parseMode: "HTML",
+      html: claimed.rendered_html,
+      imageUrl: claimed.image_url,
       replyToMessageId: claimed.reply_to_message_id,
-      disableWebPagePreview: true,
     });
 
     if (sendRes.ok) {

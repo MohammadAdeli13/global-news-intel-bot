@@ -5,6 +5,7 @@ import {
   isAdminUser,
   validateChannelTarget,
   validateFeedUrl,
+  validateImageUrl,
   verifyWebhookSecret,
 } from "../src/security";
 import { classifyTelegramSendResponse } from "../src/telegram";
@@ -53,12 +54,29 @@ describe("Phase 3 Security & Telegram Classification", () => {
     }
   });
 
-  it("validates public @username and private -100 numeric channels", () => {
+it("validates public @username, private -100 channels/supergroups, and standard negative group IDs", () => {
     expect(validateChannelTarget("@world_news_24").ok).toBe(true);
     expect(validateChannelTarget("-1001987654321").ok).toBe(true);
+    expect(validateChannelTarget("-987654321").ok).toBe(true);
     expect(validateChannelTarget("@abc").ok).toBe(false);
     expect(validateChannelTarget("123456789").ok).toBe(false);
     expect(validateChannelTarget("@bad-name!").ok).toBe(false);
+  });
+
+  it("validates image URLs with SSRF protection and rejects non-image media extensions", () => {
+    expect(validateImageUrl("https://cdn.example.com/news/photo.jpg")).toBe(
+      "https://cdn.example.com/news/photo.jpg"
+    );
+    expect(
+      validateImageUrl("https://ichef.bbci.co.uk/news/1024/photo.webp?v=1")
+    ).toBe("https://ichef.bbci.co.uk/news/1024/photo.webp?v=1");
+
+    expect(validateImageUrl("http://cdn.example.com/photo.jpg")).toBeNull();
+    expect(validateImageUrl("https://127.0.0.1/photo.jpg")).toBeNull();
+    expect(validateImageUrl("https://localhost/photo.png")).toBeNull();
+    expect(validateImageUrl("https://cdn.example.com/video.mp4")).toBeNull();
+    expect(validateImageUrl("")).toBeNull();
+    expect(validateImageUrl(null)).toBeNull();
   });
 
   it("escapes HTML safely", () => {

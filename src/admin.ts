@@ -85,7 +85,7 @@ async function handleMessage(
   now: number
 ): Promise<void> {
   // Only handle private chats from non-bot users
-  if (message.chat.type !== "private" || !message.from || message.from.is_bot) {
+if (!message.from || message.from.is_bot) {
     return;
   }
 
@@ -101,7 +101,21 @@ async function handleMessage(
   const command = rawCommand.split("@")[0] ?? rawCommand;
   const args = firstSpace === -1 ? "" : text.slice(firstSpace + 1).trim();
 
-  // /myid is allowed for any user so the owner can discover their numeric ID safely
+  if (message.chat.type !== "private") {
+    if (command === "/chatid" && isAdminUser(userId, env.ADMIN_USER_IDS)) {
+      await telegram.sendMessage({
+        chatId,
+        text:
+          `🆔 شناسه این ${message.chat.type === "supergroup" ? "سوپرگروه" : "گروه"}:\n` +
+          `<code>${chatId}</code>\n\n` +
+          `برای تنظیم به‌عنوان مقصد، در چت خصوصی ربات بفرستید:\n` +
+          `<code>/setchannel ${chatId}</code>`,
+      });
+    }
+    return;
+  }
+
+  // /myid is allowed for any user in private chat so owners can discover their numeric ID safely
   if (command === "/myid") {
     await telegram.sendMessage({
       chatId,
@@ -158,6 +172,16 @@ async function handleMessage(
       });
       return;
     }
+
+    case "/chatid": {
+      await telegram.sendMessage({
+        chatId,
+        text:
+          `🆔 شناسه این چت: <code>${chatId}</code>\n` +
+          `برای دریافت شناسه یک گروه یا سوپرگروه، دستور <code>/chatid</code> را داخل همان گروه ارسال کنید.`,
+      });
+      return;
+}
 
     case "/status": {
       const view = await renderStatusView(env.DB, now);
@@ -279,29 +303,38 @@ async function handleSetChannelCommand(
     return;
   }
 
+  const chatInfo = await telegram.getChat(validated.value);
+  const chatType = chatInfo.ok ? chatInfo.chat.type : undefined;
+
   const membership = await telegram.getChatMember(validated.value, botUser.id);
   if (!membership.ok) {
     await telegram.sendMessage({
       chatId,
       text:
-        `❌ ربات نتوانست کانال <code>${escapeHtml(validated.value)}</code> را بررسی کند.\n` +
-        `مطمئن شوید ربات را به‌عنوان <b>Admin</b> به کانال اضافه کرده‌اید.\n` +
+        `❌ ربات نتوانست مقصد <code>${escapeHtml(validated.value)}</code> را بررسی کند.\n` +
+        `مطمئن شوید ربات را به کانال (به‌عنوان Admin) یا به گروه/سوپرگروه اضافه کرده‌اید.\n` +
         `جزئیات خطا: <code>${escapeHtml(membership.description)}</code>`,
     });
     return;
   }
 
-  const canPost =
-    membership.member.status === "creator" ||
-    (membership.member.status === "administrator" &&
-      membership.member.can_post_messages === true);
+  const isGroupLike = chatType === "group" || chatType === "supergroup";
+  const canPost = isGroupLike
+    ? membership.member.status === "creator" ||
+      membership.member.status === "administrator" ||
+      membership.member.status === "member" ||
+      (membership.member.status === "restricted" &&
+        membership.member.can_send_messages !== false)
+    : membership.member.status === "creator" ||
+      (membership.member.status === "administrator" &&
+        membership.member.can_post_messages === true);
 
   if (!canPost) {
     await telegram.sendMessage({
       chatId,
-      text:
-        `❌ ربات در کانال <code>${escapeHtml(validated.value)}</code> مجوز ارسال پیام (<b>Post Messages</b>) ندارد.\n` +
-        `وضعیت فعلی: <code>${escapeHtml(membership.member.status)}</code>`,
+      text: isGroupLike
+        ? `❌ ربات در این گروه/سوپرگروه مجوز ارسال پیام ندارد (وضعیت: <code>${escapeHtml(membership.member.status)}</code>).`
+        : `❌ ربات در کانال <code>${escapeHtml(validated.value)}</code> مجوز ارسال پیام (<b>Post Messages</b>) ندارد.\nوضعیت فعلی: <code>${escapeHtml(membership.member.status)}</code>`,
     });
     return;
   }
@@ -311,14 +344,21 @@ async function handleSetChannelCommand(
     env.DB,
     "INFO",
     "admin",
-    `Target channel updated to ${validated.value}`,
-    { userId, channel: validated.value },
+    `Target destination updated to ${validated.value} (${chatType ?? "channel"})`,
+    { userId, channel: validated.value, chatType: chatType ?? "channel" },
     now
   );
 
+  const destLabel =
+    chatType === "supergroup"
+      ? "سوپرگروه"
+      : chatType === "group"
+        ? "گروه"
+        : "کانال";
+
   await telegram.sendMessage({
     chatId,
-    text: `✅ کانال مقصد با موفقیت روی <code>${escapeHtml(validated.value)}</code> تنظیم و مجوز ارسال تأیید شد.`,
+    text: `✅ ${destLabel} مقصد با موفقیت روی <code>${escapeHtml(validated.value)}</code> تنظیم و مجوز ارسال تأیید شد.`,
   });
 }
 
@@ -601,6 +641,11 @@ async function handleCallbackQuery(
         : "این مورد دیگر در وضعیت FAILED نیست.";
       view = await renderStatusView(env.DB, now);
     }
+  } else if (data === "p:toggle_images") {
+    const nextImages = !settings.includeImages;
+    await setSetting(env.DB, "includeImages", nextImages, now);
+    view = renderMainPanel({ ...settings, includeImages: nextImages });
+    feedback = nextImages ? "نمایش تصویر در پست‌ها فعال شد 🖼" : "نمایش تصویر در پست‌ها غیرفعال شد";
   } else {
     feedback = "عملیات ناشناخته";
   }
@@ -630,7 +675,8 @@ function renderHelpText(): string {
     "• /pause — توقف موقت رصد و انتشار",
     "• /resume — شروع مجدد سیستم",
     "• /runonce — ثبت درخواست بررسی فوری در صف Cron",
-    "• /setchannel <code>@channel</code> یا <code>-100...</code> — تنظیم کانال مقصد",
+    "• /setchannel <code>@username</code> یا <code>-100...</code> یا <code>-...</code> — تنظیم مقصد انتشار (کانال، سوپرگروه یا گروه عادی)",
+    "• /chatid — نمایش شناسه عددی چت (ارسال داخل گروه یا سوپرگروه برای دریافت آیدی آن)",
     "• /addfeed <code>https://... [نام]</code> — افزودن منبع خبری RSS/Atom",
     "• /removefeed <code>url یا شناسه</code> — غیرفعال‌سازی منبع خبری (با حفظ تاریخچه)",
     "• /myid — نمایش شناسه عددی شما",
@@ -648,14 +694,16 @@ function renderMainPanel(settings: BotSettings): {
   const langText = settings.language === "fa" ? "فارسی 🇮🇷" : "انگلیسی 🇬🇧";
   const aiText = settings.geminiEnabled ? "فعال ✅" : "غیرفعال ❌";
   const gdeltText = settings.gdeltEnabled ? "فعال ✅" : "غیرفعال";
+  const imagesText = settings.includeImages ? "فعال ✅" : "غیرفعال";
 
   const text = [
     "🎛 <b>پنل مدیریت ربات رصد اخبار جهان</b>",
     "",
     `• وضعیت سیستم: <b>${statusBadge}</b>`,
-    `• کانال مقصد: ${channelText}`,
+    `• مقصد انتشار: ${channelText}`,
     `• زبان انتشار: <b>${langText}</b>`,
     `• تحلیل Gemini: <b>${aiText}</b> | GDELT: <b>${gdeltText}</b>`,
+    `• تصاویر پست‌ها: <b>${imagesText}</b>`,
     `• آستانه‌ها: اهمیت <b>${settings.minImportanceScore}</b> | اعتبار <b>${settings.minCredibilityScore}</b>`,
     `• بازه بررسی: هر <b>${settings.checkIntervalMinutes} دقیقه</b> | سقف: <b>${settings.maxPostsPerHour}/ساعت</b> و <b>${settings.maxPostsPerDay}/روز</b>`,
     `• دسته‌های فعال: <b>${settings.enabledCategories.length}</b> از ${NEWS_CATEGORIES.length}`,
@@ -675,7 +723,7 @@ function renderMainPanel(settings: BotSettings): {
       ],
       [
         { text: "📡 منابع خبری", callback_data: "p:feeds" },
-        { text: "📢 کانال مقصد", callback_data: "p:channel" },
+        { text: "📢 مقصد انتشار", callback_data: "p:channel" },
       ],
       [
         { text: "🗂 دسته‌بندی‌ها", callback_data: "p:cats" },
@@ -690,9 +738,15 @@ function renderMainPanel(settings: BotSettings): {
           text: settings.gdeltEnabled ? "🌍 GDELT: فعال" : "🌍 GDELT: غیرفعال",
           callback_data: "p:toggle_gdelt",
         },
-        { text: "⚡ بررسی فوری (Job)", callback_data: "p:job:run_once" },
+        {
+          text: settings.includeImages ? "🖼 تصاویر: فعال" : "🖼 تصاویر: غیرفعال",
+          callback_data: "p:toggle_images",
+        },
       ],
-      [{ text: "📊 وضعیت، لاگ‌ها و صف خطا", callback_data: "p:status" }],
+      [
+        { text: "⚡ بررسی فوری (Job)", callback_data: "p:job:run_once" },
+        { text: "📊 وضعیت و لاگ‌ها", callback_data: "p:status" },
+      ],
     ],
   };
 
@@ -920,16 +974,21 @@ function renderChannelPanel(settings: BotSettings): {
 } {
   const current = settings.targetChannel
     ? `<code>${escapeHtml(settings.targetChannel)}</code>`
-    : "⚠️ هنوز کانالی تنظیم نشده است.";
+    : "⚠️ هنوز مقصدی تنظیم نشده است.";
 
   const text = [
-    "📢 <b>تنظیم کانال مقصد انتشار</b>",
+    "📢 <b>تنظیم مقصد انتشار (کانال، سوپرگروه یا گروه)</b>",
     "",
-    `کانال فعلی: ${current}`,
+    `مقصد فعلی: ${current}`,
     "",
-    "برای تغییر کانال بدون تغییر کد، ابتدا ربات را در کانال ادمین کنید (با مجوز Post Messages) و سپس دستور زیر را بفرستید:",
-    "• کانال عمومی: <code>/setchannel @channel_username</code>",
-    "• کانال خصوصی: <code>/setchannel -1001234567890</code>",
+    "برای تنظیم یا تغییر مقصد بدون تغییر کد:",
+    "۱) در <b>کانال</b>: ربات را Admin کنید و مجوز <b>Post Messages</b> بدهید.",
+    "۲) در <b>گروه یا سوپرگروه</b>: ربات را عضو گروه کنید (و در صورت نیاز مجوز ارسال پیام بدهید). برای گرفتن شناسه، دستور <code>/chatid</code> را داخل همان گروه بفرستید.",
+    "",
+    "سپس در همین چت خصوصی دستور مناسب را ارسال کنید:",
+    "• کانال یا سوپرگروه عمومی: <code>/setchannel @username</code>",
+    "• کانال خصوصی یا سوپرگروه: <code>/setchannel -1001234567890</code>",
+    "• گروه عادی: <code>/setchannel -123456789</code>",
   ].join("\n");
 
   return {

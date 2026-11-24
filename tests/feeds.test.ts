@@ -167,4 +167,41 @@ describe("Phase 4 RSS/Atom & GDELT Feeds", () => {
       expect(check.ok, `Invalid default source URL: ${src.url}`).toBe(true);
     }
   });
+
+  it("extracts valid HTTPS image URLs from media:content, enclosure, and description img while rejecting unsafe/video URLs", () => {
+    const mediaXml = `<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+      <channel>
+        <item>
+          <title>Item 1 - media:content image (skips video)</title>
+          <link>https://news.example.com/1</link>
+          <media:content url="https://cdn.example.com/clip.mp4" medium="video" type="video/mp4" />
+          <media:content url="https://cdn.example.com/media-photo.jpg" medium="image" type="image/jpeg" />
+        </item>
+        <item>
+          <title>Item 2 - enclosure image</title>
+          <link>https://news.example.com/2</link>
+          <enclosure url="https://cdn.example.com/enclosure-photo.jpg" type="image/jpeg" length="42000" />
+        </item>
+        <item>
+          <title>Item 3 - description img fallback</title>
+          <link>https://news.example.com/3</link>
+          <description><![CDATA[<p><img src="https://cdn.example.com/desc-photo.png" alt="scene" />Breaking report.</p>]]></description>
+        </item>
+        <item>
+          <title>Item 4 - unsafe HTTP and SSRF images rejected</title>
+          <link>https://news.example.com/4</link>
+          <media:content url="http://cdn.example.com/insecure.jpg" medium="image" />
+          <enclosure url="https://127.0.0.1/internal.jpg" type="image/jpeg" />
+        </item>
+      </channel>
+    </rss>`;
+
+    const items = parseFeedXml(mediaXml, { now: 1_000_000 });
+    expect(items).toHaveLength(4);
+    expect(items[0]?.imageUrl).toBe("https://cdn.example.com/media-photo.jpg");
+    expect(items[1]?.imageUrl).toBe("https://cdn.example.com/enclosure-photo.jpg");
+    expect(items[2]?.imageUrl).toBe("https://cdn.example.com/desc-photo.png");
+    expect(items[3]?.imageUrl).toBeNull();
+  });
 });

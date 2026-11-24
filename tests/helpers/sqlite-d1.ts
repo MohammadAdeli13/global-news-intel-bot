@@ -1,5 +1,6 @@
 import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from "sql.js";
-import migrationSql from "../../migrations/0001_initial.sql?raw";
+import migration0001Sql from "../../migrations/0001_initial.sql?raw";
+import migration0002Sql from "../../migrations/0002_add_images.sql?raw";
 
 let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
 
@@ -91,7 +92,8 @@ export async function createTestD1(): Promise<{
   const sqlDb = new SQL.Database();
   sqlDb.run("PRAGMA foreign_keys = ON;");
 
-  sqlDb.exec(migrationSql);
+  sqlDb.exec(migration0001Sql);
+  sqlDb.exec(migration0002Sql);
 
   const d1Adapter = {
     prepare(query: string) {

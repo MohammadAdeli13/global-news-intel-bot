@@ -1,3 +1,4 @@
+import { validateImageUrl } from "../security";
 export interface FeedHttpResponseLike {
   readonly ok: boolean;
   readonly status: number;
@@ -23,6 +24,7 @@ export interface RawFeedItem {
   author: string | null;
   publishedAt: number;
   hasExplicitDate: boolean;
+  imageUrl: string | null;
 }
 
 export type FeedFetchResult =
@@ -240,7 +242,7 @@ function parseRssItem(block: string, now: number): RawFeedItem | null {
     extractFirstTagRaw(block, lower, ["pubdate", "dc:date", "date", "published"])
   );
   const parsedDate = parseDateSafe(rawDate);
-
+  const imageUrl = extractItemImageUrl(block, lower, rawSummary);
   return {
     title: title.slice(0, 300),
     url: rawUrl,
@@ -248,6 +250,7 @@ function parseRssItem(block: string, now: number): RawFeedItem | null {
     author: author ? author.slice(0, 120) : null,
     publishedAt: parsedDate ?? now,
     hasExplicitDate: parsedDate !== null,
+    imageUrl,
   };
 }
 
@@ -277,6 +280,8 @@ function parseAtomEntry(block: string, now: number): RawFeedItem | null {
   );
   const parsedDate = parseDateSafe(rawDate);
 
+  const imageUrl = extractItemImageUrl(block, lower, rawSummary);
+
   return {
     title: title.slice(0, 300),
     url: rawUrl,
@@ -284,6 +289,7 @@ function parseAtomEntry(block: string, now: number): RawFeedItem | null {
     author: author ? author.slice(0, 120) : null,
     publishedAt: parsedDate ?? now,
     hasExplicitDate: parsedDate !== null,
+    imageUrl,
   };
 }
 
@@ -528,4 +534,77 @@ function parseDateSafe(raw: string): number | null {
   const ts = Date.parse(raw);
   if (!Number.isFinite(ts) || ts <= 0) return null;
   return ts;
+}
+
+function extractItemImageUrl(
+  block: string,
+  lower: string,
+  rawHtmlSummary: string
+): string | null {
+  // 1. <media:content url="..."> or <media:thumbnail url="...">
+  for (const tag of ["<media:content", "<media:thumbnail"]) {
+    let pos = 0;
+    while (pos < lower.length) {
+      const idx = lower.indexOf(tag, pos);
+      if (idx === -1) break;
+      const endIdx = lower.indexOf(">", idx + tag.length);
+      if (endIdx === -1) break;
+
+      const tagStr = block.slice(idx, endIdx + 1);
+      const medium = extractAttr(tagStr, "medium").toLowerCase();
+      const type = extractAttr(tagStr, "type").toLowerCase();
+      const rawUrl = decodeXmlEntities(extractAttr(tagStr, "url")).trim();
+
+      const isVideoOrAudio =
+        medium === "video" ||
+        medium === "audio" ||
+        type.startsWith("video/") ||
+        type.startsWith("audio/");
+
+      if (!isVideoOrAudio) {
+        const valid = validateImageUrl(rawUrl);
+        if (valid) return valid;
+      }
+      pos = endIdx + 1;
+    }
+  }
+
+  // 2. <enclosure url="..." type="image/...">
+  let encPos = 0;
+  while (encPos < lower.length) {
+    const idx = lower.indexOf("<enclosure", encPos);
+    if (idx === -1) break;
+    const endIdx = lower.indexOf(">", idx + 10);
+    if (endIdx === -1) break;
+
+    const tagStr = block.slice(idx, endIdx + 1);
+    const type = extractAttr(tagStr, "type").toLowerCase();
+    const rawUrl = decodeXmlEntities(extractAttr(tagStr, "url")).trim();
+    if (!type || type.startsWith("image/")) {
+      const valid = validateImageUrl(rawUrl);
+      if (valid) return valid;
+    }
+    encPos = endIdx + 1;
+  }
+
+  // 3. Fallback: <img src="..."> inside description/summary HTML
+  if (rawHtmlSummary) {
+    const decoded = decodeXmlEntities(unwrapCdata(rawHtmlSummary));
+    const decodedLower = decoded.toLowerCase();
+    let imgPos = 0;
+    while (imgPos < decodedLower.length) {
+      const idx = decodedLower.indexOf("<img", imgPos);
+      if (idx === -1) break;
+      const endIdx = decodedLower.indexOf(">", idx + 4);
+      if (endIdx === -1) break;
+
+      const tagStr = decoded.slice(idx, endIdx + 1);
+      const rawSrc = decodeXmlEntities(extractAttr(tagStr, "src")).trim();
+      const valid = validateImageUrl(rawSrc);
+      if (valid) return valid;
+      imgPos = endIdx + 1;
+    }
+  }
+
+  return null;
 }

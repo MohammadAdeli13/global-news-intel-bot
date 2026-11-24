@@ -62,6 +62,7 @@ export interface InlineKeyboardMarkup {
 export interface TelegramChatMember {
   status: "creator" | "administrator" | "member" | "restricted" | "left" | "kicked";
   can_post_messages?: boolean;
+  can_send_messages?: boolean;
 }
 
 interface TelegramApiEnvelope<T> {
@@ -161,14 +162,22 @@ export class TelegramClient {
     replyMarkup?: InlineKeyboardMarkup;
     replyToMessageId?: number | null;
     disableWebPagePreview?: boolean;
+    linkPreviewImageUrl?: string | null;
   }): Promise<TelegramSendOutcome> {
     const payload: Record<string, unknown> = {
       chat_id: params.chatId,
       text: params.text,
       parse_mode: params.parseMode ?? "HTML",
-      link_preview_options: {
-        is_disabled: params.disableWebPagePreview ?? true,
-      },
+      link_preview_options: params.linkPreviewImageUrl
+        ? {
+          is_disabled: false,
+          url: params.linkPreviewImageUrl,
+          prefer_large_media: true,
+          show_above_text: true,
+          }
+        : {
+          is_disabled: params.disableWebPagePreview ?? true,
+          },
     };
 
     if (params.replyMarkup) {
@@ -259,6 +268,98 @@ export class TelegramClient {
       ok: false,
       description: envelope.description ?? `HTTP ${res.status}`,
     };
+  }
+
+  async getChat(
+    chatId: string | number
+  ): Promise<{ ok: true; chat: TelegramChat } | { ok: false; description: string }> {
+    const res = await this.callRaw("getChat", { chat_id: chatId });
+    if (!res.transportOk) {
+      return { ok: false, description: res.errorDetail };
+    }
+    const envelope = res.body as TelegramApiEnvelope<TelegramChat>;
+    if (envelope.ok && envelope.result) {
+      return { ok: true, chat: envelope.result };
+    }
+    return {
+      ok: false,
+      description: envelope.description ?? `HTTP ${res.status}`,
+    };
+  }
+
+  async sendPhoto(params: {
+    chatId: string | number;
+    photoUrl: string;
+    caption: string;
+    parseMode?: "HTML";
+    replyToMessageId?: number | null;
+  }): Promise<TelegramSendOutcome> {
+    const payload: Record<string, unknown> = {
+      chat_id: params.chatId,
+      photo: params.photoUrl,
+      caption: params.caption,
+      parse_mode: params.parseMode ?? "HTML",
+    };
+
+    if (params.replyToMessageId) {
+      payload.reply_parameters = {
+        message_id: params.replyToMessageId,
+        allow_sending_without_reply: true,
+      };
+    }
+
+    const res = await this.callRaw("sendPhoto", payload);
+    return classifyTelegramSendResponse(res);
+  }
+
+  async sendNewsPostWithMedia(params: {
+    chatId: string | number;
+    html: string;
+    imageUrl?: string | null;
+    replyToMessageId?: number | null;
+  }): Promise<TelegramSendOutcome> {
+    const imageUrl = params.imageUrl?.trim() || null;
+
+    if (imageUrl && params.html.length <= 1024) {
+      const photoRes = await this.sendPhoto({
+        chatId: params.chatId,
+        photoUrl: imageUrl,
+        caption: params.html,
+        parseMode: "HTML",
+        replyToMessageId: params.replyToMessageId,
+      });
+
+      // Only fall back to text-only if Telegram returned a definite HTTP 400 (guaranteed not delivered)
+      if (!photoRes.ok && photoRes.kind === "permanent" && photoRes.status === 400) {
+        return this.sendMessage({
+          chatId: params.chatId,
+          text: params.html,
+          parseMode: "HTML",
+          replyToMessageId: params.replyToMessageId,
+          disableWebPagePreview: true,
+        });
+      }
+      return photoRes;
+    }
+
+    if (imageUrl) {
+      // >1024 chars: single atomic message with large image preview above text (full 4096-char budget)
+      return this.sendMessage({
+        chatId: params.chatId,
+        text: params.html,
+        parseMode: "HTML",
+        replyToMessageId: params.replyToMessageId,
+        linkPreviewImageUrl: imageUrl,
+      });
+    }
+
+    return this.sendMessage({
+      chatId: params.chatId,
+      text: params.html,
+      parseMode: "HTML",
+      replyToMessageId: params.replyToMessageId,
+      disableWebPagePreview: true,
+    });
   }
 }
 

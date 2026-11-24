@@ -4,6 +4,8 @@ import {
   type RawFeedItem,
 } from "./rss";
 
+import { validateImageUrl } from "../security";
+
 export const GDELT_TIMEOUT_MS = 5_000;
 export const GDELT_DEFAULT_MAX_RECORDS = 15;
 
@@ -15,6 +17,7 @@ interface GdeltArticlePayload {
   title?: unknown;
   seendate?: unknown;
   domain?: unknown;
+  socialimage?: unknown;
 }
 
 interface GdeltDocResponse {
@@ -118,6 +121,10 @@ export async function fetchGdeltArticles(params?: {
         publishedAt: parsedDate ?? now,
         hasExplicitDate: parsedDate !== null,
         domain,
+        imageUrl:
+          typeof entry.socialimage === "string"
+            ? validateImageUrl(entry.socialimage)
+            : null,
       });
     }
 
